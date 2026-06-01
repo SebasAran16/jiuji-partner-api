@@ -1,0 +1,86 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Belt {
+  WHITE
+  BLUE
+  PURPLE
+  BROWN
+  BLACK
+}
+
+enum Objective {
+  COMPETITION
+  RECREATIONAL
+  SELF_DEFENSE
+  CONDITIONING
+  TECHNICAL_DEVELOPMENT
+}
+
+enum Intensity {
+  LOW
+  MODERATE
+  HIGH
+  VERY_HIGH
+}
+
+model User {
+  id                         String     @id @default(uuid())
+  email                      String     @unique
+  passwordHash               String     @map("password_hash")
+  firstName                  String?    @map("first_name")
+  lastName                   String?    @map("last_name")
+  belt                       Belt       @default(WHITE)
+  stripes                    Int        @default(0)
+  age                        Int?
+  weight                     Float?
+  bjjAcademy                 String?    @map("bjj_academy")
+  timeTraining               Int?       @map("time_training")
+  trainingsPerWeek           Int?       @map("trainings_per_week")
+  objective                  Objective?
+  intensity                  Intensity?
+  avatarUrl                  String?    @map("avatar_url")
+  isVerified                 Boolean    @default(false) @map("is_verified")
+  verificationToken          String?    @unique @map("verification_token")
+  verificationTokenExpiresAt DateTime?  @map("verification_token_expires_at")
+  createdAt                  DateTime   @default(now()) @map("created_at")
+  updatedAt                  DateTime   @updatedAt @map("updated_at")
+
+  @@map("users")
+}
+
+model Movement {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  category    String
+  type        String
+  minBelt     Belt     @default(WHITE) @map("min_belt")
+  gi          Boolean  @default(true)
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("movements")
+}
+
+model Video {
+  id           String   @id @default(uuid())
+  title        String
+  description  String?
+  url          String
+  thumbnailUrl String?  @map("thumbnail_url")
+  duration     Int?
+  competitor   String?
+  competition  String?
+  tags         String[]
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("videos")
+}
