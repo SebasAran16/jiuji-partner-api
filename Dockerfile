@@ -14,7 +14,9 @@ RUN pnpm prisma generate
 
 COPY . .
 
-RUN if [ "$NODE_ENV" != "production" ]; then \
+RUN if [ "$NODE_ENV" = "production" ]; then \
+      pnpm build; \
+    else \
       echo "Dev mode: skipping ahead-of-time build (handled by start:dev)"; \
     fi
 
