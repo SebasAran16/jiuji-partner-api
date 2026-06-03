@@ -92,6 +92,41 @@ export abstract class PrismaRepository<T, CreateInput, UpdateInput> {
     return this.raw.count(args);
   }
 
+  async findManyPaginated(params: {
+    page?: number;
+    perPage?: number;
+    where?: Record<string, any>;
+    orderBy?: Record<string, any>;
+    include?: Record<string, any>;
+  }): Promise<{
+    data: T[];
+    total: number;
+    page: number;
+    perPage: number;
+    totalPages: number;
+  }> {
+    const page = params.page || 1;
+    const perPage = params.perPage || 10;
+    const skip = (page - 1) * perPage;
+    const [data, total] = await Promise.all([
+      this.raw.findMany({
+        skip,
+        take: perPage,
+        where: params.where,
+        orderBy: params.orderBy,
+        include: params.include,
+      }),
+      this.raw.count({ where: params.where }),
+    ]);
+    return {
+      data: this.toEntityList(data),
+      total,
+      page,
+      perPage,
+      totalPages: Math.ceil(total / perPage),
+    };
+  }
+
   async exists(where: Record<string, any>): Promise<boolean> {
     const count = await this.raw.count({ where });
     return count > 0;

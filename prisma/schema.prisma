@@ -52,7 +52,36 @@ model User {
   createdAt                  DateTime   @default(now()) @map("created_at")
   updatedAt                  DateTime   @updatedAt @map("updated_at")
 
+  sessions TrainingSession[]
+
   @@map("users")
+}
+
+model TrainingSession {
+  id               String                    @id @default(uuid())
+  userId           String                    @map("user_id")
+  date             DateTime                  @default(now())
+  durationMinutes  Int                       @map("duration_minutes")
+  intensityFeeling Int                       @map("intensity_feeling")
+  notes            String?
+  createdAt        DateTime                  @default(now()) @map("created_at")
+  updatedAt        DateTime                  @updatedAt @map("updated_at")
+  user             User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  movements        TrainingSessionMovement[]
+
+  @@map("training_sessions")
+}
+
+model TrainingSessionMovement {
+  id               String          @id @default(uuid())
+  sessionId        String          @map("session_id")
+  movementId       String          @map("movement_id")
+  timeSpentMinutes Int             @map("time_spent_minutes")
+  notes            String?
+  session          TrainingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  movement         Movement        @relation(fields: [movementId], references: [id])
+
+  @@map("training_session_movements")
 }
 
 model Movement {
@@ -66,6 +95,7 @@ model Movement {
   description String?
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
+  sessionMovements TrainingSessionMovement[]
 
   @@map("movements")
 }

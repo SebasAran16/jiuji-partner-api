@@ -7,6 +7,7 @@ import { AppController } from './http/controller/app.controller';
 import { AuthController } from './http/controller/auth.controller';
 import { UsersController } from './http/controller/users.controller';
 import { MovementsController } from './http/controller/movements.controller';
+import { TrainingSessionsController } from './http/controller/training-sessions.controller';
 
 @Module({
   imports: [
@@ -21,7 +22,7 @@ import { MovementsController } from './http/controller/movements.controller';
       },
     }),
   ],
-  controllers: [AppController, AuthController, UsersController, MovementsController],
+  controllers: [AppController, AuthController, UsersController, MovementsController, TrainingSessionsController],
   providers: [...CoreModuleProviders.getProviders()],
   exports: [...CoreModuleExports.getExports()],
 })
