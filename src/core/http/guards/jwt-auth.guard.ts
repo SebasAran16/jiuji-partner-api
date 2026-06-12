@@ -5,6 +5,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import type { UserIdentity } from '../../../../const';
 import { Request } from 'express';
 
 @Injectable()
@@ -21,7 +22,7 @@ export class JwtAuthGuard implements CanActivate {
 
     try {
       const payload = await this.jwtService.verifyAsync(token);
-      request['user'] = { id: payload.sub, email: payload.email };
+      request['user'] = { id: payload.sub, email: payload.email, role: payload.role || 'USER' } satisfies UserIdentity;
       return true;
     } catch {
       throw new UnauthorizedException('Invalid or expired token');

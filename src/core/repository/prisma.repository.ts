@@ -1,3 +1,4 @@
+import type { PaginatedQuery, PaginatedResult } from '../../../const';
 import { PrismaService } from '../../prisma/prisma.service';
 
 export type EntityClass<T> = new (data: Partial<T>) => T;
@@ -92,19 +93,11 @@ export abstract class PrismaRepository<T, CreateInput, UpdateInput> {
     return this.raw.count(args);
   }
 
-  async findManyPaginated(params: {
-    page?: number;
-    perPage?: number;
+  async findManyPaginated(params: PaginatedQuery & {
     where?: Record<string, any>;
     orderBy?: Record<string, any>;
     include?: Record<string, any>;
-  }): Promise<{
-    data: T[];
-    total: number;
-    page: number;
-    perPage: number;
-    totalPages: number;
-  }> {
+  }): Promise<PaginatedResult<T>> {
     const page = params.page || 1;
     const perPage = params.perPage || 10;
     const skip = (page - 1) * perPage;

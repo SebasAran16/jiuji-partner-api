@@ -30,6 +30,18 @@ enum Intensity {
   VERY_HIGH
 }
 
+enum Role {
+  USER
+  ADMIN
+}
+
+enum ProcessingStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
 model User {
   id                         String     @id @default(uuid())
   email                      String     @unique
@@ -46,6 +58,7 @@ model User {
   objective                  Objective?
   intensity                  Intensity?
   avatarUrl                  String?    @map("avatar_url")
+  role                       Role       @default(USER)
   isVerified                 Boolean    @default(false) @map("is_verified")
   verificationToken          String?    @unique @map("verification_token")
   verificationTokenExpiresAt DateTime?  @map("verification_token_expires_at")
@@ -96,21 +109,40 @@ model Movement {
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
   sessionMovements TrainingSessionMovement[]
+  videoMovements    VideoMovement[]
 
   @@map("movements")
 }
 
 model Video {
-  id           String   @id @default(uuid())
-  title        String
-  description  String?
-  url          String
-  thumbnailUrl String?  @map("thumbnail_url")
-  duration     Int?
-  competitor   String?
-  competition  String?
-  tags         String[]
-  createdAt    DateTime @default(now()) @map("created_at")
+  id               String           @id @default(uuid())
+  title            String
+  description      String?
+  url              String
+  thumbnailUrl     String?          @map("thumbnail_url")
+  duration         Int?
+  competitor       String?
+  competition      String?
+  tags             String[]
+  processingStatus ProcessingStatus @default(PENDING) @map("processing_status")
+  createdAt        DateTime         @default(now()) @map("created_at")
+
+  movements VideoMovement[]
 
   @@map("videos")
+}
+
+model VideoMovement {
+  id             String   @id @default(uuid())
+  videoId        String   @map("video_id")
+  movementId     String   @map("movement_id")
+  timestampStart Int?     @map("timestamp_start")
+  timestampEnd   Int?     @map("timestamp_end")
+  confidence     Float?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  video    Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  movement Movement @relation(fields: [movementId], references: [id], onDelete: Cascade)
+
+  @@map("video_movements")
 }

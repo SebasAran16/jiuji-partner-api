@@ -1,6 +1,6 @@
 import { IsOptional, IsInt, IsNumber, IsString, Min, Max, IsEnum } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Belt, Objective, Intensity } from '@prisma/client';
+import { Belt, Objective, Intensity } from '../../../../../const';
 
 export class UpdateUserDto {
   @ApiPropertyOptional({ description: 'First name', example: 'John' })

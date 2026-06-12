@@ -1,6 +1,6 @@
 import { IsOptional, IsBoolean, IsEnum, IsString } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Belt } from '@prisma/client';
+import { Belt } from '../../../../../const';
 import { Transform } from 'class-transformer';
 
 export class QueryMovementsDto {

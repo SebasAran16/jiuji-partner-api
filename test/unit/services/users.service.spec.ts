@@ -22,6 +22,7 @@ const mockUser = (overrides: Record<string, any> = {}) => ({
   verificationToken: null,
   verificationTokenExpiresAt: null,
   avatarUrl: null,
+  role: 'USER',
   createdAt: new Date(),
   updatedAt: new Date(),
   ...overrides,

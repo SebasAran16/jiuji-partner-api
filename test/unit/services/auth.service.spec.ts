@@ -32,6 +32,7 @@ const mockUser = (overrides: Record<string, any> = {}) => ({
   verificationToken: 'token-123',
   verificationTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
   avatarUrl: null,
+  role: 'USER',
   createdAt: new Date(),
   updatedAt: new Date(),
   ...overrides,
@@ -85,7 +86,7 @@ describe('AuthService', () => {
       userRepository.findByEmail.mockResolvedValue(null);
       userRepository.create.mockResolvedValue(mockUser());
 
-      const result = await service.register('test@test.com', 'password123');
+      const result = await service.register('test@test.com', 'Secure@123');
 
       expect(userRepository.findByEmail).toHaveBeenCalledWith('test@test.com');
       expect(userRepository.create).toHaveBeenCalledWith(

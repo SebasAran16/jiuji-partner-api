@@ -8,9 +8,11 @@ export class VideoEntity {
   competitor: string | null;
   competition: string | null;
   tags: string[];
+  processingStatus: string;
   createdAt: Date;
 
   constructor(partial: Partial<VideoEntity>) {
     Object.assign(this, partial);
   }
 }
+

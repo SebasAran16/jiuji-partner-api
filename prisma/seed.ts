@@ -1,6 +1,10 @@
 import { PrismaClient, Belt } from '@prisma/client';
+import * as bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
+
+const ADMIN_EMAIL = 'admin@jiujipartner.com';
+const ADMIN_PASSWORD = 'jiujipartner123';
 
 const movements = [
   { name: 'Armbar', slug: 'armbar', category: 'submission', type: 'joint_lock', minBelt: Belt.WHITE, gi: true },
@@ -27,6 +31,22 @@ async function main() {
   }
 
   console.log(`Seeded ${movements.length} movements`);
+
+  const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, 12);
+  await prisma.user.upsert({
+    where: { email: ADMIN_EMAIL },
+    update: {},
+    create: {
+      email: ADMIN_EMAIL,
+      passwordHash,
+      role: 'ADMIN',
+      isVerified: true,
+      firstName: 'Admin',
+      lastName: 'JiuJi',
+    },
+  });
+
+  console.log(`Seeded admin user: ${ADMIN_EMAIL}`);
 }
 
 main()

@@ -1,6 +1,6 @@
 import { IsEnum, IsInt, IsNotEmpty, IsOptional, IsString, Min, Max } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
-import { Belt, Objective, Intensity } from '@prisma/client';
+import { Belt, Objective, Intensity } from '../../../../../const';
 
 export class OnboardingDto {
   @ApiProperty({ description: 'First name', example: 'John' })

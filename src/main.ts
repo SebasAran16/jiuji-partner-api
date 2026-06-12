@@ -1,7 +1,14 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { getQueueToken } from '@nestjs/bull';
+import { createBullBoard } from '@bull-board/api';
+import { BullAdapter } from '@bull-board/api/bullAdapter';
+import { ExpressAdapter } from '@bull-board/express';
+import cookieParser from 'cookie-parser';
+import type { Request, Response, NextFunction } from 'express';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
@@ -26,6 +33,8 @@ async function bootstrap() {
     }),
   );
 
+  app.use(cookieParser());
+
   const configService = app.get(ConfigService);
 
   const swaggerConfig = new DocumentBuilder()
@@ -38,9 +47,53 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('api/docs', app, document);
 
+  // Bull Board queue dashboard (protected behind JWT + ADMIN role)
+  const jwtService = app.get(JwtService);
+  const queue = app.get(getQueueToken('video-import'));
+
+  const serverAdapter = new ExpressAdapter();
+  serverAdapter.setBasePath('/admin/queues');
+
+  createBullBoard({
+    queues: [new BullAdapter(queue)],
+    serverAdapter,
+  });
+
+  app.use('/admin/queues', (req: Request, res: Response, next: NextFunction) => {
+    const token =
+      req.headers.authorization?.replace('Bearer ', '') ||
+      (typeof req.query.token === 'string' ? req.query.token : null) ||
+      req.cookies?.admin_token;
+
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    try {
+      const payload = jwtService.verify(token);
+      if (payload.role !== 'ADMIN') {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      if (!req.cookies?.admin_token && typeof req.query.token === 'string') {
+        res.cookie('admin_token', token, {
+          httpOnly: true,
+          sameSite: 'lax',
+          path: '/admin/queues',
+          maxAge: 7 * 24 * 60 * 60 * 1000,
+        });
+      }
+      next();
+    } catch {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+  });
+
+  app.use('/admin/queues', serverAdapter.getRouter());
+
   const port = configService.get<number>('PORT', 3001);
   await app.listen(port);
   console.log(`JiuJi Partner API running on port ${port}`);
 }
 
-bootstrap();
+void bootstrap();
+

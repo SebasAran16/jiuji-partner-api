@@ -1,4 +1,4 @@
-import { Belt, Objective, Intensity } from '@prisma/client';
+import { Belt, Objective, Intensity, Role } from '../../../const';
 
 export class UserEntity {
   id: string;
@@ -15,6 +15,7 @@ export class UserEntity {
   trainingsPerWeek: number | null;
   objective: Objective | null;
   intensity: Intensity | null;
+  role: Role;
   isVerified: boolean;
   verificationToken: string | null;
   verificationTokenExpiresAt: Date | null;

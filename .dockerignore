@@ -1,0 +1,8 @@
+.git
+.gitignore
+node_modules
+*.md
+.env
+.env.local
+test
+coverage

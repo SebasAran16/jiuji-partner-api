@@ -8,6 +8,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import type { UserIdentity } from '../../../../const';
 import { JwtAuthGuard } from '../guards/jwt-auth.guard';
 import { CurrentUser } from '../decorators/current-user.decorator';
 import { TrainingSessionsService } from '../../services/training-sessions.service';
@@ -23,7 +24,7 @@ export class TrainingSessionsController {
 
   @Post()
   async create(
-    @CurrentUser() user: { id: string },
+    @CurrentUser() user: UserIdentity,
     @Body() dto: CreateTrainingSessionDto,
   ) {
     return this.trainingSessionsService.create(user.id, dto);
@@ -31,7 +32,7 @@ export class TrainingSessionsController {
 
   @Get()
   async findAll(
-    @CurrentUser() user: { id: string },
+    @CurrentUser() user: UserIdentity,
     @Query() query: QueryTrainingSessionsDto,
   ) {
     const page = query.page ?? 1;
@@ -41,7 +42,7 @@ export class TrainingSessionsController {
 
   @Get(':id')
   async findById(
-    @CurrentUser() user: { id: string },
+    @CurrentUser() user: UserIdentity,
     @Param('id') id: string,
   ) {
     return this.trainingSessionsService.findById(user.id, id);

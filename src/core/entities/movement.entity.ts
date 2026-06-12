@@ -1,4 +1,4 @@
-import { Belt } from '@prisma/client';
+import { Belt } from '../../../const';
 
 export class MovementEntity {
   id: string;

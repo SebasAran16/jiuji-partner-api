@@ -1,10 +1,10 @@
-import { Controller, Post, Put, Get, Body, HttpCode, HttpStatus, UseGuards, Req } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBody, ApiBearerAuth } from '@nestjs/swagger';
+import { Controller, Post, Get, Put, Body, Param, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthService } from '../../services/auth.service';
 import { RegisterDto, LoginDto, OnboardingDto, VerifyEmailDto, ResendVerificationDto } from '../request/auth';
 import { JwtAuthGuard } from '../guards/jwt-auth.guard';
 import { CurrentUser } from '../decorators/current-user.decorator';
-import { Request } from 'express';
+import type { UserIdentity } from '../../../../const';
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -13,65 +13,52 @@ export class AuthController {
 
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({ summary: 'Register a new user (email + password only)' })
-  @ApiBody({ type: RegisterDto })
-  @ApiResponse({ status: 201, description: 'Returns JWT access token' })
-  @ApiResponse({ status: 409, description: 'Email already in use' })
-  async register(@Body() dto: RegisterDto): Promise<{ accessToken: string }> {
+  @ApiOperation({ summary: 'Register a new user' })
+  async register(@Body() dto: RegisterDto) {
     return this.authService.register(dto.email, dto.password);
   }
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Login with email and password' })
-  @ApiBody({ type: LoginDto })
-  @ApiResponse({ status: 200, description: 'Returns JWT access token' })
-  @ApiResponse({ status: 401, description: 'Invalid credentials or email not verified' })
-  async login(@Body() dto: LoginDto): Promise<{ accessToken: string }> {
+  @ApiOperation({ summary: 'Login' })
+  async login(@Body() dto: LoginDto) {
     return this.authService.login(dto.email, dto.password);
   }
 
   @Put('onboarding')
   @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Complete onboarding wizard' })
-  @ApiBody({ type: OnboardingDto })
-  @ApiResponse({ status: 200, description: 'Onboarding completed' })
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Complete onboarding' })
   async completeOnboarding(
-    @CurrentUser() user: { id: string; email: string },
+    @CurrentUser() user: UserIdentity,
     @Body() dto: OnboardingDto,
-  ): Promise<void> {
-    return this.authService.completeOnboarding(user.id, dto);
+  ) {
+    await this.authService.completeOnboarding(user.id, dto);
+    return { message: 'Onboarding completed' };
   }
 
   @Post('verify-email')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Verify email with token' })
-  @ApiBody({ type: VerifyEmailDto })
-  @ApiResponse({ status: 200, description: 'Email verified' })
-  @ApiResponse({ status: 400, description: 'Invalid or expired token' })
-  async verifyEmail(@Body() dto: VerifyEmailDto): Promise<void> {
-    return this.authService.verifyEmail(dto.token);
+  async verifyEmail(@Body() dto: VerifyEmailDto) {
+    await this.authService.verifyEmail(dto.token);
+    return { message: 'Email verified successfully' };
   }
 
   @Post('resend-verification')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Resend verification email' })
-  @ApiBody({ type: ResendVerificationDto })
-  @ApiResponse({ status: 200, description: 'Verification email resent' })
-  @ApiResponse({ status: 400, description: 'No account found or already verified' })
-  async resendVerification(@Body() dto: ResendVerificationDto): Promise<void> {
-    return this.authService.resendVerification(dto.email);
+  async resendVerification(@Body() dto: ResendVerificationDto) {
+    await this.authService.resendVerification(dto.email);
+    return { message: 'Verification email sent' };
   }
 
   @Get('me')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Get current user profile' })
-  @ApiResponse({ status: 200, description: 'User profile' })
-  async getProfile(@CurrentUser() user: { id: string; email: string }) {
+  async getProfile(@CurrentUser() user: UserIdentity) {
     return this.authService.getProfile(user.id);
   }
 }

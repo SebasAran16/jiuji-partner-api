@@ -3,6 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
+import type { OnboardingData } from '../../../const';
 import { UserRepository } from '../repository/user.repository';
 import { MailService } from './mail.service';
 
@@ -36,7 +37,7 @@ export class AuthService {
 
     await this.mailService.sendVerificationEmail(email, verificationToken);
 
-    const accessToken = this.generateToken(user.id, user.email);
+    const accessToken = await this.generateTokenForUser(user.id, user.email);
     return { accessToken };
   }
 
@@ -55,26 +56,11 @@ export class AuthService {
       throw new UnauthorizedException('Invalid email or password');
     }
 
-    const accessToken = this.generateToken(user.id, user.email);
+    const accessToken = await this.generateTokenForUser(user.id, user.email);
     return { accessToken };
   }
 
-  async completeOnboarding(
-    userId: string,
-    dto: {
-      firstName: string;
-      lastName: string;
-      age: number;
-      belt: string;
-      stripes: number;
-      bjjAcademy: string;
-      timeTraining: number;
-      trainingsPerWeek: number;
-      objective: string;
-      intensity: string;
-      weight?: number;
-    },
-  ): Promise<void> {
+  async completeOnboarding(userId: string, dto: OnboardingData): Promise<void> {
     const user = await this.userRepository.findById(userId);
     if (!user) {
       throw new BadRequestException('User not found');
@@ -146,8 +132,15 @@ export class AuthService {
     return profile;
   }
 
-  private generateToken(sub: string, email: string): string {
-    const payload = { sub, email };
+  private generateToken(sub: string, email: string, role?: string): string {
+    const payload: Record<string, any> = { sub, email };
+    if (role) payload.role = role;
     return this.jwtService.sign(payload);
+  }
+
+  private async generateTokenForUser(userId: string, email: string): Promise<string> {
+    const user = await this.userRepository.findById(userId);
+    const role = user?.role || 'USER';
+    return this.generateToken(userId, email, role);
   }
 }
