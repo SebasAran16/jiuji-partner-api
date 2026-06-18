@@ -42,6 +42,12 @@ enum ProcessingStatus {
   FAILED
 }
 
+enum SuggestionStatus {
+  PENDING
+  APPROVED
+  DECLINED
+}
+
 model User {
   id                         String     @id @default(uuid())
   email                      String     @unique
@@ -127,7 +133,8 @@ model Video {
   processingStatus ProcessingStatus @default(PENDING) @map("processing_status")
   createdAt        DateTime         @default(now()) @map("created_at")
 
-  movements VideoMovement[]
+  movements   VideoMovement[]
+  suggestions MovementSuggestion[]
 
   @@map("videos")
 }
@@ -145,4 +152,31 @@ model VideoMovement {
   movement Movement @relation(fields: [movementId], references: [id], onDelete: Cascade)
 
   @@map("video_movements")
+}
+
+model MovementSuggestion {
+  id             String           @id @default(uuid())
+  name           String
+  // Dedupe key: one suggestion per technique name, across all statuses.
+  // DECLINED rows are the system's memory of "considered, rejected" —
+  // they must outlive their evidence video, hence nullable videoId + SetNull.
+  normalizedName String           @unique @map("normalized_name")
+  description    String?
+  category       String?
+  type           String?
+  gi             Boolean?
+  confidence     Float?
+  videoId        String?          @map("video_id")
+  timestampStart Int?             @map("timestamp_start")
+  timestampEnd   Int?             @map("timestamp_end")
+  evidence       String?
+  status         SuggestionStatus @default(PENDING)
+  reviewedAt     DateTime?        @map("reviewed_at")
+  createdMovementId String?       @map("created_movement_id")
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  video Video? @relation(fields: [videoId], references: [id], onDelete: SetNull)
+
+  @@map("movement_suggestions")
 }

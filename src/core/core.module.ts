@@ -11,6 +11,7 @@ import { MovementsController } from './http/controller/movements.controller';
 import { TrainingSessionsController } from './http/controller/training-sessions.controller';
 import { VideosController } from './http/controller/videos.controller';
 import { AiController } from './http/controller/ai.controller';
+import { MovementSuggestionsController } from './http/controller/movement-suggestions.controller';
 
 @Module({
   imports: [
@@ -36,7 +37,7 @@ import { AiController } from './http/controller/ai.controller';
       },
     }),
   ],
-  controllers: [AppController, AuthController, UsersController, MovementsController, TrainingSessionsController, VideosController, AiController],
+  controllers: [AppController, AuthController, UsersController, MovementsController, TrainingSessionsController, VideosController, AiController, MovementSuggestionsController],
   providers: [...CoreModuleProviders.getProviders()],
   exports: [...CoreModuleExports.getExports()],
 })

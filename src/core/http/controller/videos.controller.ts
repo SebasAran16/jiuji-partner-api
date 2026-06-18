@@ -1,22 +1,29 @@
 import {
+  BadGatewayException,
   Controller,
   Get,
   Post,
   Put,
   Delete,
   Body,
+  Headers,
   Param,
   Query,
   HttpCode,
   HttpStatus,
+  Res,
+  UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
+import { JwtService } from '@nestjs/jwt';
+import type { Response } from 'express';
 import { VideosService } from '../../services/videos.service';
 import { ImportService } from '../../services/import.service';
 import { GoogleDriveService } from '../../services/google-drive.service';
+import { MediaService } from '../../services/media.service';
 import { JwtAuthGuard } from '../guards/jwt-auth.guard';
 import { RolesGuard } from '../guards/roles.guard';
 import { Roles } from '../decorators/roles.decorator';
@@ -32,8 +39,51 @@ export class VideosController {
     private readonly videosService: VideosService,
     private readonly importService: ImportService,
     private readonly googleDriveService: GoogleDriveService,
+    private readonly mediaService: MediaService,
+    private readonly jwtService: JwtService,
     @InjectQueue('video-import') private readonly queue: Queue,
   ) {}
+
+  // <video> elements cannot send Authorization headers, so this endpoint also
+  // accepts ?token= (same pattern as the Bull Board UI). Range passthrough
+  // keeps the player seekable for evidence-timestamp review.
+  @Get(':id/stream')
+  @ApiOperation({ summary: 'Stream a video with Range support (admin; token via header or ?token=)' })
+  async stream(
+    @Param('id') id: string,
+    @Query('token') token: string | undefined,
+    @Headers('authorization') authHeader: string | undefined,
+    @Headers('range') range: string | undefined,
+    @Res() res: Response,
+  ) {
+    const rawToken = token || authHeader?.replace(/^Bearer\s+/i, '');
+    if (!rawToken) {
+      throw new UnauthorizedException('Missing token');
+    }
+    let payload: { role?: string };
+    try {
+      payload = this.jwtService.verify(rawToken);
+    } catch {
+      throw new UnauthorizedException('Invalid or expired token');
+    }
+    if (payload.role !== 'ADMIN') {
+      throw new UnauthorizedException('Admin access required');
+    }
+
+    const video = await this.videosService.findById(id);
+    let upstream;
+    try {
+      upstream = await this.mediaService.openVideoStream(video.url, range);
+    } catch (err) {
+      throw new BadGatewayException(`Could not open video stream: ${err}`);
+    }
+
+    res.status(upstream.status);
+    for (const [name, value] of Object.entries(upstream.headers)) {
+      res.setHeader(name, value);
+    }
+    upstream.stream.pipe(res);
+  }
 
   @Get()
   @UseGuards(JwtAuthGuard)

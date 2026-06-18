@@ -7,6 +7,8 @@ import { LlmService } from '../services/llm.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { VectorStoreService } from '../services/vector-store.service';
 import { MovementRepository } from '../repository/movement.repository';
+import { VideoMovementRepository } from '../repository/video-movement.repository';
+import { MovementSuggestionsService } from '../services/movement-suggestions.service';
 import type {
   FrameCaption,
   TranscriptSegment,
@@ -14,7 +16,6 @@ import type {
 } from '../../../const';
 
 const SEGMENT_SECONDS = 30;
-const TRANSCRIPT_EXCERPT_CHARS = 1500;
 
 @Processor('video-import')
 export class VideoImportProcessor {
@@ -27,6 +28,8 @@ export class VideoImportProcessor {
     private readonly transcriptionService: TranscriptionService,
     private readonly vectorStoreService: VectorStoreService,
     private readonly movementRepository: MovementRepository,
+    private readonly videoMovementRepository: VideoMovementRepository,
+    private readonly movementSuggestionsService: MovementSuggestionsService,
   ) {}
 
   @Process()
@@ -69,20 +72,20 @@ export class VideoImportProcessor {
       );
       const duration = await this.mediaService.getDurationSeconds(videoPath);
 
-      // Frames: sample → quality-gate → caption with the VLM
-      const candidates = await this.mediaService.extractCandidateFrames(
-        videoPath,
-        workDir,
-      );
+      // Single ffmpeg decode pass yields both the captioning frames and the
+      // transcription audio (instead of decoding the whole video twice)
+      const { frames: candidates, audioPath } =
+        await this.mediaService.extractFramesAndAudio(videoPath, workDir);
+
+      // Frames: quality-gate → caption with the VLM
       const qualityFrames =
         await this.mediaService.selectQualityFrames(candidates);
       this.logger.log(
         `Video ${videoId}: ${candidates.length} candidate frames, ${qualityFrames.length} after quality gate`,
       );
 
-      const vocabulary = (await this.movementRepository.findFiltered({})).map(
-        (m) => m.name,
-      );
+      const catalog = await this.movementRepository.findFiltered({});
+      const vocabulary = catalog.map((m) => m.name);
       const captions: FrameCaption[] = [];
       for (const frame of qualityFrames) {
         const image = await this.mediaService.frameToBase64(frame.path);
@@ -92,11 +95,7 @@ export class VideoImportProcessor {
         }
       }
 
-      // Audio: extract → transcribe (both steps degrade gracefully to empty)
-      const audioPath = await this.mediaService.extractAudio(
-        videoPath,
-        workDir,
-      );
+      // Audio: transcribe (degrades gracefully to empty when there is no audio)
       const transcript = audioPath
         ? await this.transcriptionService.transcribe(audioPath)
         : [];
@@ -106,17 +105,18 @@ export class VideoImportProcessor {
       // title alone; better no description than a confident hallucination
       const hasEvidence = captions.length > 0 || transcript.length > 0;
       if (!description && hasEvidence) {
-        description = await this.llmService.generateVideoDescription({
-          title: video.title,
-          tags: video.tags,
-          competitor: video.competitor,
-          competition: video.competition,
-          captions: captions.map((c) => c.caption),
-          transcriptExcerpt: transcript
-            .map((t) => t.text)
-            .join(' ')
-            .slice(0, TRANSCRIPT_EXCERPT_CHARS),
-        });
+        // Full evidence in — LlmService chunks + map-reduces it internally so a
+        // long video's description never overflows the model's context window
+        description = await this.llmService.generateVideoDescription(
+          {
+            title: video.title,
+            tags: video.tags,
+            competitor: video.competitor,
+            competition: video.competition,
+          },
+          captions,
+          transcript,
+        );
       }
 
       await this.videosService.update(videoId, {
@@ -139,6 +139,45 @@ export class VideoImportProcessor {
       await this.vectorStoreService.upsertSegments(segments, vectors);
       this.logger.log(
         `Video ${videoId}: upserted ${segments.length} segments to Qdrant`,
+      );
+
+      // Structured matching: known techniques → VideoMovement links,
+      // unknown techniques → MovementSuggestions for admin review
+      const matches = await this.llmService.matchMovements(
+        vocabulary,
+        captions,
+        transcript,
+      );
+
+      const movementIdByName = new Map(
+        catalog.map((m) => [m.name.toLowerCase(), m.id]),
+      );
+      const links = matches.known.flatMap((m) => {
+        const movementId = movementIdByName.get(m.name.toLowerCase());
+        return movementId
+          ? [
+              {
+                movementId,
+                timestampStart: Math.round(m.startTime),
+                timestampEnd: Math.round(m.endTime),
+                confidence: m.confidence,
+              },
+            ]
+          : [];
+      });
+      await this.videoMovementRepository.deleteByVideoId(videoId);
+      await this.videoMovementRepository.createForVideo(videoId, links);
+
+      let suggested = 0;
+      for (const unknown of matches.unknown) {
+        const created = await this.movementSuggestionsService.recordDetection(
+          videoId,
+          unknown,
+        );
+        if (created) suggested++;
+      }
+      this.logger.log(
+        `Video ${videoId}: ${links.length} movement links, ${suggested} new suggestions`,
       );
     } finally {
       await this.mediaService.cleanupWorkDir(workDir);

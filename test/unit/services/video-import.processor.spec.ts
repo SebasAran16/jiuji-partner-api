@@ -7,6 +7,8 @@ import { LlmService } from '../../../src/core/services/llm.service';
 import { TranscriptionService } from '../../../src/core/services/transcription.service';
 import { VectorStoreService } from '../../../src/core/services/vector-store.service';
 import { MovementRepository } from '../../../src/core/repository/movement.repository';
+import { VideoMovementRepository } from '../../../src/core/repository/video-movement.repository';
+import { MovementSuggestionsService } from '../../../src/core/services/movement-suggestions.service';
 
 const mockVideo = (overrides: Record<string, any> = {}) => ({
   id: 'video-1',
@@ -38,6 +40,8 @@ describe('VideoImportProcessor', () => {
   let llmService: jest.Mocked<LlmService>;
   let transcriptionService: jest.Mocked<TranscriptionService>;
   let vectorStoreService: jest.Mocked<VectorStoreService>;
+  let videoMovementRepository: jest.Mocked<VideoMovementRepository>;
+  let movementSuggestionsService: jest.Mocked<MovementSuggestionsService>;
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -60,10 +64,11 @@ describe('VideoImportProcessor', () => {
             cleanupWorkDir: jest.fn(),
             downloadVideo: jest.fn().mockResolvedValue('/tmp/work/source.mp4'),
             getDurationSeconds: jest.fn().mockResolvedValue(65),
-            extractCandidateFrames: jest.fn().mockResolvedValue([]),
+            extractFramesAndAudio: jest
+              .fn()
+              .mockResolvedValue({ frames: [], audioPath: '/tmp/work/audio.wav' }),
             selectQualityFrames: jest.fn().mockResolvedValue([]),
             frameToBase64: jest.fn().mockResolvedValue('base64data'),
-            extractAudio: jest.fn().mockResolvedValue('/tmp/work/audio.wav'),
           },
         },
         {
@@ -74,6 +79,9 @@ describe('VideoImportProcessor', () => {
               .fn()
               .mockResolvedValue('Generated description.'),
             embedDocuments: jest.fn(),
+            matchMovements: jest
+              .fn()
+              .mockResolvedValue({ known: [], unknown: [] }),
           },
         },
         {
@@ -87,8 +95,18 @@ describe('VideoImportProcessor', () => {
         {
           provide: MovementRepository,
           useValue: {
-            findFiltered: jest.fn().mockResolvedValue([{ name: 'Armbar' }]),
+            findFiltered: jest
+              .fn()
+              .mockResolvedValue([{ id: 'mov-armbar', name: 'Armbar' }]),
           },
+        },
+        {
+          provide: VideoMovementRepository,
+          useValue: { deleteByVideoId: jest.fn(), createForVideo: jest.fn() },
+        },
+        {
+          provide: MovementSuggestionsService,
+          useValue: { recordDetection: jest.fn().mockResolvedValue(null) },
         },
       ],
     }).compile();
@@ -99,6 +117,8 @@ describe('VideoImportProcessor', () => {
     llmService = module.get(LlmService);
     transcriptionService = module.get(TranscriptionService);
     vectorStoreService = module.get(VectorStoreService);
+    videoMovementRepository = module.get(VideoMovementRepository);
+    movementSuggestionsService = module.get(MovementSuggestionsService);
 
     llmService.embedDocuments.mockImplementation((texts: string[]) =>
       Promise.resolve(texts.map(() => [0.1, 0.2])),
@@ -199,7 +219,10 @@ describe('VideoImportProcessor', () => {
 
   it('skips transcription when the video has no audio stream', async () => {
     videosService.findById.mockResolvedValue(mockVideo());
-    mediaService.extractAudio.mockResolvedValue(null);
+    mediaService.extractFramesAndAudio.mockResolvedValue({
+      frames: [],
+      audioPath: null,
+    });
 
     await processor.process(mockJob('video-1'));
 
@@ -208,6 +231,49 @@ describe('VideoImportProcessor', () => {
       2,
       'video-1',
       'COMPLETED',
+    );
+  });
+
+  it('writes VideoMovement links for known matches and records unknown techniques', async () => {
+    videosService.findById.mockResolvedValue(mockVideo());
+    transcriptionService.transcribe.mockResolvedValue([
+      { start: 0, end: 10, text: 'Armbar drill, then a flying squirrel lock.' },
+    ]);
+    llmService.matchMovements.mockResolvedValue({
+      known: [{ name: 'Armbar', startTime: 0, endTime: 10, confidence: 0.9 }],
+      unknown: [
+        {
+          name: 'Flying Squirrel Lock',
+          description: 'A made-up lock.',
+          startTime: 5,
+          endTime: 10,
+          confidence: 0.7,
+        },
+      ],
+    });
+
+    await processor.process(mockJob('video-1'));
+
+    // catalog match resolved to the movement id, links replaced not appended
+    expect(videoMovementRepository.deleteByVideoId).toHaveBeenCalledWith(
+      'video-1',
+    );
+    expect(videoMovementRepository.createForVideo).toHaveBeenCalledWith(
+      'video-1',
+      [
+        {
+          movementId: 'mov-armbar',
+          timestampStart: 0,
+          timestampEnd: 10,
+          confidence: 0.9,
+        },
+      ],
+    );
+
+    // unknown technique goes to suggestion review, never into the catalog
+    expect(movementSuggestionsService.recordDetection).toHaveBeenCalledWith(
+      'video-1',
+      expect.objectContaining({ name: 'Flying Squirrel Lock' }),
     );
   });
 

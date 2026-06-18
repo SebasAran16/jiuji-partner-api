@@ -11,10 +11,13 @@ import { VectorStoreService } from './services/vector-store.service';
 import { TranscriptionService } from './services/transcription.service';
 import { MediaService } from './services/media.service';
 import { AiService } from './services/ai.service';
+import { MovementSuggestionsService } from './services/movement-suggestions.service';
 import { UserRepository } from './repository/user.repository';
 import { MovementRepository } from './repository/movement.repository';
 import { VideoRepository } from './repository/video.repository';
 import { TrainingSessionRepository } from './repository/training-session.repository';
+import { MovementSuggestionRepository } from './repository/movement-suggestion.repository';
+import { VideoMovementRepository } from './repository/video-movement.repository';
 import { JwtAuthGuard } from './http/guards/jwt-auth.guard';
 import { RolesGuard } from './http/guards/roles.guard';
 import { VideoImportProcessor } from './queues/video-import.processor';
@@ -35,10 +38,13 @@ export class CoreModuleProviders {
       TranscriptionService,
       MediaService,
       AiService,
+      MovementSuggestionsService,
       UserRepository,
       MovementRepository,
       VideoRepository,
       TrainingSessionRepository,
+      MovementSuggestionRepository,
+      VideoMovementRepository,
       JwtAuthGuard,
       RolesGuard,
       VideoImportProcessor,

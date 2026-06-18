@@ -1,4 +1,4 @@
-import { PrismaClient, Belt } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
@@ -6,31 +6,19 @@ const prisma = new PrismaClient();
 const ADMIN_EMAIL = 'admin@jiujipartner.com';
 const ADMIN_PASSWORD = 'jiujipartner123';
 
-const movements = [
-  { name: 'Armbar', slug: 'armbar', category: 'submission', type: 'joint_lock', minBelt: Belt.WHITE, gi: true },
-  { name: 'Triangle Choke', slug: 'triangle-choke', category: 'submission', type: 'choke', minBelt: Belt.WHITE, gi: true },
-  { name: 'Scissor Sweep', slug: 'scissor-sweep', category: 'sweep', type: 'guard_sweep', minBelt: Belt.WHITE, gi: true },
-  { name: 'Kimura', slug: 'kimura', category: 'submission', type: 'joint_lock', minBelt: Belt.WHITE, gi: true },
-  { name: 'Guillotine Choke', slug: 'guillotine-choke', category: 'submission', type: 'choke', minBelt: Belt.WHITE, gi: false },
-  { name: 'Hip Bump Sweep', slug: 'hip-bump-sweep', category: 'sweep', type: 'guard_sweep', minBelt: Belt.WHITE, gi: true },
-  { name: 'Rear Naked Choke', slug: 'rear-naked-choke', category: 'submission', type: 'choke', minBelt: Belt.WHITE, gi: false },
-  { name: 'Knee Slice Pass', slug: 'knee-slice-pass', category: 'guard_pass', type: 'pass', minBelt: Belt.BLUE, gi: true },
-  { name: 'Double Leg Takedown', slug: 'double-leg-takedown', category: 'takedown', type: 'takedown', minBelt: Belt.WHITE, gi: false },
-  { name: 'Bridge and Roll Escape', slug: 'bridge-and-roll-escape', category: 'escape', type: 'mount_escape', minBelt: Belt.WHITE, gi: true },
-];
+// Movements are intentionally NOT seeded. The catalog is grown entirely from
+// video imports: detected techniques become MovementSuggestions and only enter
+// the Movement catalog when an admin approves them.
 
 async function main() {
-  console.log('Seeding movements...');
+  const env = process.env.ENV ?? 'develop';
 
-  for (const movement of movements) {
-    await prisma.movement.upsert({
-      where: { slug: movement.slug },
-      update: {},
-      create: movement,
-    });
+  // The convenience admin user exists only outside production. Production
+  // admins are provisioned out-of-band — never from a hardcoded credential.
+  if (env === 'production') {
+    console.log('ENV=production — skipping admin user seed; nothing to seed.');
+    return;
   }
-
-  console.log(`Seeded ${movements.length} movements`);
 
   const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, 12);
   await prisma.user.upsert({
@@ -46,7 +34,7 @@ async function main() {
     },
   });
 
-  console.log(`Seeded admin user: ${ADMIN_EMAIL}`);
+  console.log(`Seeded admin user: ${ADMIN_EMAIL} (ENV=${env})`);
 }
 
 main()

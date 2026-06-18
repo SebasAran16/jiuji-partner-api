@@ -77,6 +77,53 @@ export class MediaService {
     return destination;
   }
 
+  // Proxy-open a video URL for the dashboard player. Range passthrough makes
+  // the response seekable, which the suggestion-review UI depends on
+  // (jumping straight to the evidence timestamp).
+  async openVideoStream(
+    url: string,
+    range?: string,
+  ): Promise<{
+    status: number;
+    headers: Record<string, string>;
+    stream: Readable;
+  }> {
+    const headers: Record<string, string> = {};
+    if (range) {
+      headers['Range'] = range;
+    }
+    if (new URL(url).hostname === 'www.googleapis.com') {
+      const apiKey = this.configService.get<string>('GOOGLE_API_KEY');
+      if (apiKey) {
+        headers['X-Goog-Api-Key'] = apiKey;
+      }
+    }
+
+    const response = await fetch(url, { headers });
+    if (!response.ok || !response.body) {
+      throw new Error(`Upstream returned ${response.status} for ${url}`);
+    }
+
+    const passthrough: Record<string, string> = {};
+    for (const name of [
+      'content-type',
+      'content-length',
+      'content-range',
+      'accept-ranges',
+    ]) {
+      const value = response.headers.get(name);
+      if (value) {
+        passthrough[name] = value;
+      }
+    }
+
+    return {
+      status: response.status,
+      headers: passthrough,
+      stream: Readable.fromWeb(response.body as any),
+    };
+  }
+
   async getDurationSeconds(videoPath: string): Promise<number> {
     const { stdout } = await execFileAsync('ffprobe', [
       '-v',
@@ -90,54 +137,104 @@ export class MediaService {
     return parseFloat(stdout.trim()) || 0;
   }
 
-  async extractAudio(
+  // One ffmpeg decode pass that produces BOTH the captioning frames and the
+  // Whisper audio, so a video is decoded once regardless of its length (a long
+  // instructional used to be decoded twice — once for frames, once for audio).
+  // Frames keep their scene-change→interval fallback; audio degrades to null
+  // independently so a silent video still yields captions.
+  async extractFramesAndAudio(
     videoPath: string,
     workDir: string,
-  ): Promise<string | null> {
-    const audioPath = join(workDir, 'audio.wav');
-    try {
-      // 16kHz mono WAV is what Whisper expects
-      await execFileAsync('ffmpeg', [
-        '-y',
-        '-i',
-        videoPath,
-        '-vn',
-        '-ac',
-        '1',
-        '-ar',
-        '16000',
-        audioPath,
-      ]);
-      return audioPath;
-    } catch (err) {
-      this.logger.warn(`No extractable audio in ${videoPath}: ${err}`);
-      return null;
-    }
-  }
-
-  async extractCandidateFrames(
-    videoPath: string,
-    workDir: string,
-  ): Promise<FrameInfo[]> {
+  ): Promise<{ frames: FrameInfo[]; audioPath: string | null }> {
     const framesDir = join(workDir, 'frames');
-    const sceneFrames = await this.runFrameExtraction(
+    const audioPath = join(workDir, 'audio.wav');
+
+    // Primary pass: scene-change frames + audio together
+    const scene = await this.runFrameAndAudioExtraction(
       videoPath,
       framesDir,
       `select='gt(scene,${SCENE_CHANGE_THRESHOLD})',showinfo`,
+      audioPath,
     );
-    if (sceneFrames.length >= MIN_SCENE_FRAMES) {
-      return sceneFrames;
+    if (scene.frames.length >= MIN_SCENE_FRAMES) {
+      return { frames: scene.frames, audioPath: scene.audioOk ? audioPath : null };
     }
 
+    // Too few scene changes (static instructional) → interval sampling. The
+    // audio was already produced above, so re-decode for frames only unless the
+    // primary pass couldn't extract audio (then try once more alongside it).
     this.logger.log(
-      `Only ${sceneFrames.length} scene-change frames in ${videoPath}; falling back to 1 frame / ${FALLBACK_SAMPLE_INTERVAL_SECONDS}s`,
+      `Only ${scene.frames.length} scene-change frames in ${videoPath}; falling back to 1 frame / ${FALLBACK_SAMPLE_INTERVAL_SECONDS}s`,
     );
     const fallbackDir = join(workDir, 'frames-fallback');
-    return this.runFrameExtraction(
+    const fallbackFilter = `fps=1/${FALLBACK_SAMPLE_INTERVAL_SECONDS},showinfo`;
+
+    if (scene.audioOk) {
+      const frames = await this.runFrameExtraction(
+        videoPath,
+        fallbackDir,
+        fallbackFilter,
+      );
+      return { frames, audioPath };
+    }
+    const fallback = await this.runFrameAndAudioExtraction(
       videoPath,
       fallbackDir,
-      `fps=1/${FALLBACK_SAMPLE_INTERVAL_SECONDS},showinfo`,
+      fallbackFilter,
+      audioPath,
     );
+    return {
+      frames: fallback.frames,
+      audioPath: fallback.audioOk ? audioPath : null,
+    };
+  }
+
+  // Single ffmpeg invocation with two outputs (frames + 16kHz mono WAV) driven
+  // by one decode. A video with no audio stream makes the combined mux fail, so
+  // we fall back to a frames-only decode and report audio as unavailable —
+  // frames are never lost to an audio problem.
+  private async runFrameAndAudioExtraction(
+    videoPath: string,
+    framesDir: string,
+    filter: string,
+    audioPath: string,
+  ): Promise<{ frames: FrameInfo[]; audioOk: boolean }> {
+    await execFileAsync('mkdir', ['-p', framesDir]);
+    try {
+      const { stderr } = await execFileAsync(
+        'ffmpeg',
+        [
+          '-y',
+          '-i',
+          videoPath,
+          // Frame output
+          '-vf',
+          filter,
+          '-fps_mode',
+          'vfr',
+          '-q:v',
+          '2',
+          join(framesDir, 'frame_%05d.jpg'),
+          // Audio output, same decode: 16kHz mono WAV is what Whisper expects
+          '-vn',
+          '-ac',
+          '1',
+          '-ar',
+          '16000',
+          audioPath,
+        ],
+        { maxBuffer: FFMPEG_MAX_BUFFER },
+      );
+      return { frames: await this.collectFrames(stderr, framesDir), audioOk: true };
+    } catch (err) {
+      this.logger.warn(
+        `Combined frame+audio extraction failed for ${videoPath} (likely no audio stream); retrying frames only: ${err}`,
+      );
+      // Clear any partial frames the failed pass may have written before retry
+      await rm(framesDir, { recursive: true, force: true });
+      const frames = await this.runFrameExtraction(videoPath, framesDir, filter);
+      return { frames, audioOk: false };
+    }
   }
 
   private async runFrameExtraction(
@@ -162,8 +259,15 @@ export class MediaService {
       ],
       { maxBuffer: FFMPEG_MAX_BUFFER },
     );
+    return this.collectFrames(stderr, framesDir);
+  }
 
-    // showinfo writes "n: 0 ... pts_time:12.345" per emitted frame, in output order
+  // Pair each emitted frame with its timestamp. showinfo writes
+  // "n: 0 ... pts_time:12.345" to stderr per frame, in output order.
+  private async collectFrames(
+    stderr: string,
+    framesDir: string,
+  ): Promise<FrameInfo[]> {
     const timestamps = [...stderr.matchAll(/pts_time:([\d.]+)/g)].map((m) =>
       parseFloat(m[1]),
     );

@@ -3,12 +3,15 @@ import { INestApplication, NotFoundException } from '@nestjs/common';
 import request from 'supertest';
 import { MovementsController } from '../../../src/core/http/controller/movements.controller';
 import { MovementsService } from '../../../src/core/services/movements.service';
+import { JwtAuthGuard } from '../../../src/core/http/guards/jwt-auth.guard';
+import { RolesGuard } from '../../../src/core/http/guards/roles.guard';
 
 describe('MovementsController', () => {
   let app: INestApplication;
   const mockMovementsService = {
     findAll: jest.fn(),
     findBySlug: jest.fn(),
+    findSimilar: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -19,7 +22,12 @@ describe('MovementsController', () => {
       providers: [
         { provide: MovementsService, useValue: mockMovementsService },
       ],
-    }).compile();
+    })
+      .overrideGuard(JwtAuthGuard)
+      .useValue({ canActivate: () => true })
+      .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
 
     app = module.createNestApplication();
     await app.init();
@@ -61,6 +69,27 @@ describe('MovementsController', () => {
         category: 'submission',
         gi: 'true',
       });
+    });
+  });
+
+  describe('GET /movements/similar', () => {
+    it('should return semantically similar movements (not captured by :slug)', async () => {
+      const similar = [
+        { movementId: '1', name: 'Armbar', description: null, score: 0.91 },
+      ];
+      mockMovementsService.findSimilar.mockResolvedValue(similar);
+
+      const res = await request(app.getHttpServer())
+        .get('/movements/similar')
+        .query({ name: 'Juji Gatame' })
+        .expect(200);
+
+      expect(res.body).toEqual(similar);
+      expect(mockMovementsService.findSimilar).toHaveBeenCalledWith(
+        'Juji Gatame',
+        undefined,
+      );
+      expect(mockMovementsService.findBySlug).not.toHaveBeenCalled();
     });
   });
 

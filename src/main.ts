@@ -74,7 +74,12 @@ async function bootstrap() {
       if (payload.role !== 'ADMIN') {
         return res.status(403).json({ error: 'Forbidden' });
       }
-      if (!req.cookies?.admin_token && typeof req.query.token === 'string') {
+      // Always refresh the cookie from a fresh, verified query token — even if a
+      // (possibly stale/expired) admin_token cookie already exists. The board's
+      // sub-resource and /api/queues XHRs carry no ?token=, so they fall back to
+      // the cookie; a stale cookie would 401 every one of them and leave the UI
+      // stuck on "Loading". Overwriting it on each visit makes that self-heal.
+      if (typeof req.query.token === 'string') {
         res.cookie('admin_token', token, {
           httpOnly: true,
           sameSite: 'lax',

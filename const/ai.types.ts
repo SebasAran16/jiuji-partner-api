@@ -33,13 +33,13 @@ export interface VideoSegmentDocument {
   tags: string[];
 }
 
+// Video-level metadata for description generation. The visual/audio evidence
+// (captions + transcript) is passed separately so LlmService can chunk it.
 export interface VideoDescriptionMeta {
   title: string;
   tags: string[];
   competitor?: string | null;
   competition?: string | null;
-  captions: string[];
-  transcriptExcerpt: string;
 }
 
 export interface VideoSearchResult {

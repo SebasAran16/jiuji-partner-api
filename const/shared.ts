@@ -1,1 +1,1 @@
-export { Belt, Objective, Intensity, Role, ProcessingStatus } from '@prisma/client';
+export { Belt, Objective, Intensity, Role, ProcessingStatus, SuggestionStatus } from '@prisma/client';

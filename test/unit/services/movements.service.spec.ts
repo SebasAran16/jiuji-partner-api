@@ -2,6 +2,8 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { NotFoundException } from '@nestjs/common';
 import { MovementsService } from '../../../src/core/services/movements.service';
 import { MovementRepository } from '../../../src/core/repository/movement.repository';
+import { LlmService } from '../../../src/core/services/llm.service';
+import { VectorStoreService } from '../../../src/core/services/vector-store.service';
 
 const mockMovement = (overrides: Record<string, any> = {}) => ({
   id: 'movement-1',
@@ -32,6 +34,18 @@ describe('MovementsService', () => {
           useValue: {
             findFiltered: jest.fn(),
             findBySlug: jest.fn(),
+          },
+        },
+        {
+          provide: LlmService,
+          useValue: { embedDocuments: jest.fn(), embedQuery: jest.fn() },
+        },
+        {
+          provide: VectorStoreService,
+          useValue: {
+            countMovements: jest.fn(),
+            upsertMovement: jest.fn(),
+            searchMovements: jest.fn(),
           },
         },
       ],

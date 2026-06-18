@@ -4,3 +4,4 @@ export { VideoEntity } from './video.entity';
 export { TrainingSessionEntity } from './training-session.entity';
 export { TrainingSessionMovementEntity } from './training-session-movement.entity';
 export { VideoMovementEntity } from './video-movement.entity';
+export { MovementSuggestionEntity } from './movement-suggestion.entity';
