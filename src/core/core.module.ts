@@ -16,16 +16,27 @@ import { MovementSuggestionsController } from './http/controller/movement-sugges
 @Module({
   imports: [
     ConfigModule,
-    BullModule.registerQueue({
+    BullModule.registerQueueAsync({
       name: 'video-import',
-      // One job per video. Retries only make sense at video granularity:
-      // transient failures (network, model busy) self-heal via backoff.
-      defaultJobOptions: {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 10_000 },
-        removeOnComplete: 100,
-        removeOnFail: 1000,
-      },
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        // One job per video. Retries only make sense at video granularity:
+        // transient failures (network, model busy) self-heal via backoff.
+        defaultJobOptions: {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 10_000 },
+          removeOnComplete: 100,
+          removeOnFail: 1000,
+          // Without this, one hung ffmpeg/Whisper/Ollama call stalls the whole
+          // backlog forever at concurrency 1. Bull only MARKS the job failed at
+          // this deadline — it does not stop the work, so VideoImportProcessor
+          // pairs it with an AbortSignal that actually cancels each operation.
+          timeout: Number(
+            configService.get<string>('VIDEO_IMPORT_JOB_TIMEOUT_MS', '2700000'),
+          ),
+        },
+      }),
     }),
     JwtModule.registerAsync({
       imports: [ConfigModule],

@@ -16,6 +16,10 @@ import type {
 } from '../../../const';
 
 const SEGMENT_SECONDS = 30;
+// Abort this far before Bull's own deadline so cancellation unwinds through the
+// processor's catch — which is what writes the FAILED/PENDING status. Letting
+// Bull fire first would skip that catch entirely.
+const ABORT_LEAD_MS = 5_000;
 
 @Processor('video-import')
 export class VideoImportProcessor {
@@ -41,9 +45,29 @@ export class VideoImportProcessor {
       `Processing video ${videoId} (job ${job.id}, attempt ${attempt}/${maxAttempts})`,
     );
 
+    // Bull's `timeout` marks the job failed but leaves the work running, so a
+    // hung ffmpeg/fetch/Ollama call would survive as a zombie for the rest of a
+    // multi-day run. This controller is threaded into every blocking call in
+    // the pipeline so the deadline actually cancels them.
+    const jobTimeoutMs = job.opts.timeout ?? 0;
+    const controller = new AbortController();
+    const abortTimer =
+      jobTimeoutMs > 0
+        ? setTimeout(
+            () =>
+              controller.abort(
+                new DOMException(
+                  `Video import job ${job.id} exceeded ${jobTimeoutMs}ms`,
+                  'AbortError',
+                ),
+              ),
+            Math.max(1_000, jobTimeoutMs - ABORT_LEAD_MS),
+          ).unref()
+        : undefined;
+
     try {
       await this.videosService.setProcessingStatus(videoId, 'PROCESSING');
-      await this.vectorizeVideo(videoId);
+      await this.vectorizeVideo(videoId, controller.signal);
       await this.videosService.setProcessingStatus(videoId, 'COMPLETED');
       this.logger.log(`Video ${videoId} processed successfully`);
     } catch (err) {
@@ -58,10 +82,12 @@ export class VideoImportProcessor {
       );
       // Rethrow so Bull records the failure and schedules the backoff retry
       throw err;
+    } finally {
+      if (abortTimer) clearTimeout(abortTimer);
     }
   }
 
-  private async vectorizeVideo(videoId: string) {
+  private async vectorizeVideo(videoId: string, signal: AbortSignal) {
     const video = await this.videosService.findById(videoId);
     const workDir = await this.mediaService.createWorkDir();
 
@@ -69,13 +95,21 @@ export class VideoImportProcessor {
       const videoPath = await this.mediaService.downloadVideo(
         video.url,
         workDir,
+        signal,
       );
-      const duration = await this.mediaService.getDurationSeconds(videoPath);
+      const duration = await this.mediaService.getDurationSeconds(
+        videoPath,
+        signal,
+      );
 
       // Single ffmpeg decode pass yields both the captioning frames and the
       // transcription audio (instead of decoding the whole video twice)
       const { frames: candidates, audioPath } =
-        await this.mediaService.extractFramesAndAudio(videoPath, workDir);
+        await this.mediaService.extractFramesAndAudio(
+          videoPath,
+          workDir,
+          signal,
+        );
 
       // Frames: quality-gate → caption with the VLM
       const qualityFrames =
@@ -89,7 +123,11 @@ export class VideoImportProcessor {
       const captions: FrameCaption[] = [];
       for (const frame of qualityFrames) {
         const image = await this.mediaService.frameToBase64(frame.path);
-        const caption = await this.llmService.captionFrame(image, vocabulary);
+        const caption = await this.llmService.captionFrame(
+          image,
+          vocabulary,
+          signal,
+        );
         if (caption) {
           captions.push({ timestamp: frame.timestamp, caption });
         }
@@ -97,7 +135,7 @@ export class VideoImportProcessor {
 
       // Audio: transcribe (degrades gracefully to empty when there is no audio)
       const transcript = audioPath
-        ? await this.transcriptionService.transcribe(audioPath)
+        ? await this.transcriptionService.transcribe(audioPath, signal)
         : [];
 
       let description = video.description;
@@ -116,6 +154,7 @@ export class VideoImportProcessor {
           },
           captions,
           transcript,
+          signal,
         );
       }
 
@@ -147,6 +186,7 @@ export class VideoImportProcessor {
         vocabulary,
         captions,
         transcript,
+        signal,
       );
 
       const movementIdByName = new Map(

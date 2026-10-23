@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { readFile } from 'fs/promises';
 import { basename } from 'path';
 import type { TranscriptSegment } from '../../../const';
+import { withDeadline, isAbortError } from '../util/deadline';
 
 // Only gateway to speech-to-text. 'whisper-local' is the dev provider (local
 // container, zero API spend while testing); production will use a managed
@@ -13,6 +14,7 @@ const SUPPORTED_TRANSCRIPTION_PROVIDERS = ['whisper-local'] as const;
 export class TranscriptionService {
   private readonly logger = new Logger(TranscriptionService.name);
   private readonly whisperUrl: string;
+  private readonly requestTimeoutMs: number;
 
   constructor(private readonly configService: ConfigService) {
     const provider = this.configService.get<string>(
@@ -30,11 +32,17 @@ export class TranscriptionService {
       'WHISPER_URL',
       'http://localhost:9000',
     );
+    this.requestTimeoutMs = Number(
+      this.configService.get<string>('WHISPER_TIMEOUT_MS', '1200000'),
+    );
   }
 
   // Empty result (no narration, whisper down) is a degraded-but-valid outcome:
   // frame captions and metadata still produce a usable document
-  async transcribe(audioPath: string): Promise<TranscriptSegment[]> {
+  async transcribe(
+    audioPath: string,
+    signal?: AbortSignal,
+  ): Promise<TranscriptSegment[]> {
     try {
       const buffer = await readFile(audioPath);
       const form = new FormData();
@@ -45,6 +53,7 @@ export class TranscriptionService {
         {
           method: 'POST',
           body: form,
+          signal: withDeadline(this.requestTimeoutMs, signal),
         },
       );
       if (!response.ok) {
@@ -61,6 +70,16 @@ export class TranscriptionService {
         .map((s) => ({ start: s.start, end: s.end, text: s.text.trim() }))
         .filter((s) => s.text.length > 0);
     } catch (err) {
+      // Whisper's own failures (including its deadline) stay degradable — frame
+      // captions alone still produce a usable document. Cancellation of the job
+      // itself does not: nothing downstream should run after it.
+      if (signal?.aborted) throw err;
+      if (isAbortError(err)) {
+        this.logger.warn(
+          `Transcription exceeded ${this.requestTimeoutMs}ms for ${audioPath}, continuing without audio`,
+        );
+        return [];
+      }
       this.logger.warn(
         `Transcription failed for ${audioPath}, continuing without audio: ${err}`,
       );

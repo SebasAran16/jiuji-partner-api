@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ChatOllama, OllamaEmbeddings } from '@langchain/ollama';
+import type { BaseMessage } from '@langchain/core/messages';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import type {
   FrameCaption,
@@ -24,6 +25,7 @@ import {
   MOVEMENT_MATCHING_SYSTEM_PROMPT,
   buildMovementMatchingUserPrompt,
 } from '../../../const';
+import { withDeadline } from '../util/deadline';
 
 // LlmService is the ONLY gateway to LLM inference: the rest of the app never
 // imports a provider SDK. 'ollama' is the local/dev provider (containers exist
@@ -32,17 +34,26 @@ import {
 // System prompts live in const/llm/.
 const SUPPORTED_AI_PROVIDERS = ['ollama'] as const;
 
+// Chat, vision and structured-JSON calls share one model and context window and
+// differ only in sampling — see createHandle.
+type InferenceKind = 'chat' | 'vision' | 'json';
+
 @Injectable()
 export class LlmService {
   private readonly logger = new Logger(LlmService.name);
-  private readonly chatModel: ChatOllama;
-  private readonly visionModel: ChatOllama;
-  private readonly jsonModel: ChatOllama;
   private readonly embeddings: OllamaEmbeddings;
+  // Handles are built per call (see createHandle) rather than held, so these
+  // are the settings they are built from.
+  private readonly baseUrl: string;
+  private readonly chatModelName: string;
+  private readonly numCtx: number;
   // Token budget for one matching/description prompt, and the time-overlap
   // between adjacent chunks so a technique spanning a boundary isn't lost.
   private readonly chunkTokens: number;
   private readonly chunkOverlapSeconds: number;
+  // Deadline for a single inference call. A caption measures ~21s on the
+  // reference GPU, so anything approaching this is a hang, not slow work.
+  private readonly requestTimeoutMs: number;
 
   constructor(private readonly configService: ConfigService) {
     const provider = this.configService.get<string>('AI_PROVIDER', 'ollama');
@@ -86,30 +97,86 @@ export class LlmService {
     this.chunkOverlapSeconds = Number(
       this.configService.get<string>('MATCH_CHUNK_OVERLAP_SECONDS', '30'),
     );
+    this.requestTimeoutMs = Number(
+      this.configService.get<string>('OLLAMA_REQUEST_TIMEOUT_MS', '120000'),
+    );
 
-    this.chatModel = new ChatOllama({
-      baseUrl,
-      model: chatModelName,
-      temperature: 0.2,
-      numCtx,
-    });
-    // Same model today, but vision is a separate handle so it can diverge via env later
-    this.visionModel = new ChatOllama({
-      baseUrl,
-      model: chatModelName,
-      temperature: 0.1,
-      numCtx,
-    });
-    // JSON mode constrains generation to valid JSON — required for structured
-    // tasks with small models, which otherwise wrap output in prose/markdown
-    this.jsonModel = new ChatOllama({
-      baseUrl,
-      model: chatModelName,
-      temperature: 0,
-      format: 'json',
-      numCtx,
-    });
+    this.baseUrl = baseUrl;
+    this.chatModelName = chatModelName;
+    this.numCtx = numCtx;
     this.embeddings = new OllamaEmbeddings({ baseUrl, model: embedModelName });
+  }
+
+  // A fresh handle per call. `client.abort()` — the only thing that actually
+  // cancels an Ollama request, see runInference — aborts EVERY request in
+  // flight on that client, so a shared handle would let a cancelled video
+  // import kill an admin's concurrent RAG chat. Constructing one costs nothing
+  // (no connection is opened until the request) and numCtx stays identical
+  // across kinds, so Ollama never reloads the model between calls.
+  private createHandle(kind: InferenceKind): ChatOllama {
+    return new ChatOllama({
+      baseUrl: this.baseUrl,
+      model: this.chatModelName,
+      // Vision is its own kind so it can diverge via env later; today only the
+      // sampling temperature separates it from chat.
+      temperature: kind === 'json' ? 0 : kind === 'vision' ? 0.1 : 0.2,
+      // JSON mode constrains generation to valid JSON — required for structured
+      // tasks with small models, which otherwise wrap output in prose/markdown
+      ...(kind === 'json' ? { format: 'json' as const } : {}),
+      numCtx: this.numCtx,
+    });
+  }
+
+  // The single path to inference, and the only place cancellation is handled.
+  //
+  // LangChain's `signal` call-option does NOT cancel an Ollama request. The
+  // provider inspects it only between streamed chunks, so the ~20s vision
+  // prefill — ~95% of a caption's cost — is entirely uncancellable; and when it
+  // does notice, it ends the stream with a bare `return`, yielding a TRUNCATED
+  // answer that is indistinguishable from a complete one. Measured against
+  // @langchain/ollama 1.2.7: a 1.5s signal did not stop a 35s generation.
+  // So cancellation is driven here — abort the client's in-flight request, then
+  // assert the abort instead of trusting whatever content came back.
+  private async runInference(
+    kind: InferenceKind,
+    messages: BaseMessage[],
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const model = this.createHandle(kind);
+    const deadline = withDeadline(this.requestTimeoutMs, signal);
+    deadline.throwIfAborted();
+
+    const inflight = model.invoke(messages);
+    // Whichever promise loses the race below still settles; without a handler
+    // its rejection would surface as an unhandled rejection.
+    inflight.catch(() => undefined);
+
+    // client.abort() stops the request server-side, but it is a no-op when it
+    // fires before the HTTP request has registered — measured: a 300ms deadline
+    // on a 1.4s call left the caller waiting the full 1.4s. So the deadline
+    // rejects the caller directly and the abort is best-effort cleanup; a call
+    // never outlives its own deadline regardless of when the abort lands.
+    let settled = false;
+    const cancelled = new Promise<never>((_, reject) => {
+      deadline.addEventListener(
+        'abort',
+        () => {
+          // Already returned — leaving this pending is what keeps the
+          // now-irrelevant deadline from raising an unhandled rejection.
+          if (settled) return;
+          model.client.abort();
+          reject(deadline.reason);
+        },
+        { once: true },
+      );
+    });
+
+    try {
+      const response = await Promise.race([inflight, cancelled]);
+      return (response.content as string) ?? '';
+    } finally {
+      settled = true;
+    }
   }
 
   // nomic-embed-text is trained with task prefixes; mismatched or missing
@@ -127,20 +194,25 @@ export class LlmService {
   async captionFrame(
     imageBase64: string,
     movementVocabulary: string[],
+    signal?: AbortSignal,
   ): Promise<string | null> {
-    const response = await this.visionModel.invoke([
-      new SystemMessage(buildCaptionSystemPrompt(movementVocabulary)),
-      new HumanMessage({
-        content: [
-          {
-            type: 'image_url',
-            image_url: `data:image/jpeg;base64,${imageBase64}`,
-          },
-        ],
-      }),
-    ]);
+    const raw = await this.runInference(
+      'vision',
+      [
+        new SystemMessage(buildCaptionSystemPrompt(movementVocabulary)),
+        new HumanMessage({
+          content: [
+            {
+              type: 'image_url',
+              image_url: `data:image/jpeg;base64,${imageBase64}`,
+            },
+          ],
+        }),
+      ],
+      signal,
+    );
 
-    const caption = (response.content as string).trim();
+    const caption = raw.trim();
     if (!caption || caption.toUpperCase().startsWith(SKIP_TOKEN)) {
       return null;
     }
@@ -154,41 +226,56 @@ export class LlmService {
     meta: VideoDescriptionMeta,
     captions: FrameCaption[],
     transcript: TranscriptSegment[],
+    signal?: AbortSignal,
   ): Promise<string> {
     const chunks = this.chunkEvidence(captions, transcript);
 
     if (chunks.length <= 1) {
-      const response = await this.chatModel.invoke([
-        new SystemMessage(DESCRIPTION_SYSTEM_PROMPT),
-        new HumanMessage(buildDescriptionUserPrompt(meta, captions, transcript)),
-      ]);
-      return (response.content as string).trim();
+      const description = await this.runInference(
+        'chat',
+        [
+          new SystemMessage(DESCRIPTION_SYSTEM_PROMPT),
+          new HumanMessage(
+            buildDescriptionUserPrompt(meta, captions, transcript),
+          ),
+        ],
+        signal,
+      );
+      return description.trim();
     }
 
     // Map: one factual sentence per window
     const summaries: string[] = [];
     for (const chunk of chunks) {
-      const response = await this.chatModel.invoke([
-        new SystemMessage(DESCRIPTION_CHUNK_SYSTEM_PROMPT),
-        new HumanMessage(
-          buildDescriptionChunkPrompt(
-            chunk.captions,
-            chunk.transcript,
-            chunk.start,
-            chunk.end,
+      const raw = await this.runInference(
+        'chat',
+        [
+          new SystemMessage(DESCRIPTION_CHUNK_SYSTEM_PROMPT),
+          new HumanMessage(
+            buildDescriptionChunkPrompt(
+              chunk.captions,
+              chunk.transcript,
+              chunk.start,
+              chunk.end,
+            ),
           ),
-        ),
-      ]);
-      const summary = (response.content as string).trim();
+        ],
+        signal,
+      );
+      const summary = raw.trim();
       if (summary) summaries.push(summary);
     }
 
     // Reduce: fold the window summaries into the final description
-    const response = await this.chatModel.invoke([
-      new SystemMessage(DESCRIPTION_SYSTEM_PROMPT),
-      new HumanMessage(buildDescriptionReducePrompt(meta, summaries)),
-    ]);
-    return (response.content as string).trim();
+    const description = await this.runInference(
+      'chat',
+      [
+        new SystemMessage(DESCRIPTION_SYSTEM_PROMPT),
+        new HumanMessage(buildDescriptionReducePrompt(meta, summaries)),
+      ],
+      signal,
+    );
+    return description.trim();
   }
 
   // Locate catalog techniques in the video (→ VideoMovement links) and surface
@@ -199,6 +286,7 @@ export class LlmService {
     catalog: string[],
     captions: FrameCaption[],
     transcript: TranscriptSegment[],
+    signal?: AbortSignal,
   ): Promise<MovementMatchResult> {
     // Only evidence is required. An empty catalog is the normal early state
     // (the catalog is grown from imports), and must NOT skip matching — with no
@@ -210,7 +298,7 @@ export class LlmService {
 
     const chunks = this.chunkEvidence(captions, transcript);
     if (chunks.length <= 1) {
-      return this.matchMovementsChunk(catalog, captions, transcript);
+      return this.matchMovementsChunk(catalog, captions, transcript, signal);
     }
 
     this.logger.log(
@@ -226,6 +314,7 @@ export class LlmService {
           catalog,
           chunk.captions,
           chunk.transcript,
+          signal,
         ),
       );
     }
@@ -238,6 +327,7 @@ export class LlmService {
     catalog: string[],
     captions: FrameCaption[],
     transcript: TranscriptSegment[],
+    signal?: AbortSignal,
   ): Promise<MovementMatchResult> {
     const userPrompt = buildMovementMatchingUserPrompt(
       catalog,
@@ -247,12 +337,15 @@ export class LlmService {
     this.logger.log(
       `Matching input: catalog=${catalog.length} captions=${captions.length} transcript=${transcript.length} promptChars=${userPrompt.length} (~${Math.round(userPrompt.length / 4)} tokens)`,
     );
-    const response = await this.jsonModel.invoke([
-      new SystemMessage(MOVEMENT_MATCHING_SYSTEM_PROMPT),
-      new HumanMessage(userPrompt),
-    ]);
+    const raw = await this.runInference(
+      'json',
+      [
+        new SystemMessage(MOVEMENT_MATCHING_SYSTEM_PROMPT),
+        new HumanMessage(userPrompt),
+      ],
+      signal,
+    );
 
-    const raw = (response.content as string) ?? '';
     try {
       const parsed = JSON.parse(this.extractJsonObject(raw));
       const catalogSet = new Set(catalog.map((n) => n.toLowerCase()));
@@ -455,10 +548,10 @@ export class LlmService {
     question: string,
     sources: VideoSearchResult[],
   ): Promise<string> {
-    const response = await this.chatModel.invoke([
+    const answer = await this.runInference('chat', [
       new SystemMessage(RAG_CHAT_SYSTEM_PROMPT),
       new HumanMessage(buildRagUserPrompt(question, sources)),
     ]);
-    return (response.content as string).trim();
+    return answer.trim();
   }
 }

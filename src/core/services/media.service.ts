@@ -10,6 +10,7 @@ import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import sharp from 'sharp';
 import type { FrameInfo, FrameQuality, ScoredFrame } from '../../../const';
+import { withDeadline, isAbortError } from '../util/deadline';
 
 const execFileAsync = promisify(execFile);
 // showinfo logs one stderr line per frame; default 1MB buffer overflows on long videos
@@ -33,8 +34,23 @@ const FALLBACK_SAMPLE_INTERVAL_SECONDS = 10;
 @Injectable()
 export class MediaService {
   private readonly logger = new Logger(MediaService.name);
+  // Per-operation deadlines, all comfortably under the job timeout so a hang is
+  // attributed to the stage that caused it rather than to the job as a whole.
+  private readonly downloadTimeoutMs: number;
+  private readonly ffprobeTimeoutMs: number;
+  private readonly ffmpegTimeoutMs: number;
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(private readonly configService: ConfigService) {
+    this.downloadTimeoutMs = Number(
+      this.configService.get<string>('VIDEO_DOWNLOAD_TIMEOUT_MS', '1200000'),
+    );
+    this.ffprobeTimeoutMs = Number(
+      this.configService.get<string>('FFPROBE_TIMEOUT_MS', '60000'),
+    );
+    this.ffmpegTimeoutMs = Number(
+      this.configService.get<string>('FFMPEG_TIMEOUT_MS', '1800000'),
+    );
+  }
 
   async createWorkDir(): Promise<string> {
     return mkdtemp(join(tmpdir(), 'video-import-'));
@@ -44,8 +60,15 @@ export class MediaService {
     await rm(workDir, { recursive: true, force: true });
   }
 
-  async downloadVideo(url: string, workDir: string): Promise<string> {
+  async downloadVideo(
+    url: string,
+    workDir: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
     const destination = join(workDir, 'source.mp4');
+    // One deadline for headers AND body: a download that stalls mid-stream is
+    // the failure mode that matters, and it is invisible to a headers-only timeout.
+    const deadline = withDeadline(this.downloadTimeoutMs, signal);
 
     // Google API URLs are stored without credentials; authenticate per-request
     const headers: Record<string, string> = {};
@@ -56,7 +79,7 @@ export class MediaService {
       }
     }
 
-    const response = await fetch(url, { headers });
+    const response = await fetch(url, { headers, signal: deadline });
     if (!response.ok || !response.body) {
       throw new Error(`Download failed (${response.status}) for ${url}`);
     }
@@ -73,6 +96,7 @@ export class MediaService {
     await pipeline(
       Readable.fromWeb(response.body as any),
       createWriteStream(destination),
+      { signal: deadline },
     );
     return destination;
   }
@@ -124,17 +148,40 @@ export class MediaService {
     };
   }
 
-  async getDurationSeconds(videoPath: string): Promise<number> {
-    const { stdout } = await execFileAsync('ffprobe', [
-      '-v',
-      'error',
-      '-show_entries',
-      'format=duration',
-      '-of',
-      'csv=p=0',
-      videoPath,
-    ]);
+  async getDurationSeconds(
+    videoPath: string,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    const { stdout } = await execFileAsync(
+      'ffprobe',
+      [
+        '-v',
+        'error',
+        '-show_entries',
+        'format=duration',
+        '-of',
+        'csv=p=0',
+        videoPath,
+      ],
+      this.childProcessOptions(this.ffprobeTimeoutMs, signal),
+    );
     return parseFloat(stdout.trim()) || 0;
+  }
+
+  // `timeout` + `killSignal` are what actually reap the child: an aborted
+  // promise alone would leave ffmpeg/ffprobe running. `signal` additionally
+  // carries job-level cancellation down to the process.
+  private childProcessOptions(
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+    maxBuffer?: number,
+  ) {
+    return {
+      signal: withDeadline(timeoutMs, signal),
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL' as const,
+      ...(maxBuffer ? { maxBuffer } : {}),
+    };
   }
 
   // One ffmpeg decode pass that produces BOTH the captioning frames and the
@@ -145,6 +192,7 @@ export class MediaService {
   async extractFramesAndAudio(
     videoPath: string,
     workDir: string,
+    signal?: AbortSignal,
   ): Promise<{ frames: FrameInfo[]; audioPath: string | null }> {
     const framesDir = join(workDir, 'frames');
     const audioPath = join(workDir, 'audio.wav');
@@ -155,6 +203,7 @@ export class MediaService {
       framesDir,
       `select='gt(scene,${SCENE_CHANGE_THRESHOLD})',showinfo`,
       audioPath,
+      signal,
     );
     if (scene.frames.length >= MIN_SCENE_FRAMES) {
       return { frames: scene.frames, audioPath: scene.audioOk ? audioPath : null };
@@ -174,6 +223,7 @@ export class MediaService {
         videoPath,
         fallbackDir,
         fallbackFilter,
+        signal,
       );
       return { frames, audioPath };
     }
@@ -182,6 +232,7 @@ export class MediaService {
       fallbackDir,
       fallbackFilter,
       audioPath,
+      signal,
     );
     return {
       frames: fallback.frames,
@@ -198,6 +249,7 @@ export class MediaService {
     framesDir: string,
     filter: string,
     audioPath: string,
+    signal?: AbortSignal,
   ): Promise<{ frames: FrameInfo[]; audioOk: boolean }> {
     await execFileAsync('mkdir', ['-p', framesDir]);
     try {
@@ -223,16 +275,29 @@ export class MediaService {
           '16000',
           audioPath,
         ],
-        { maxBuffer: FFMPEG_MAX_BUFFER },
+        this.childProcessOptions(
+          this.ffmpegTimeoutMs,
+          signal,
+          FFMPEG_MAX_BUFFER,
+        ),
       );
       return { frames: await this.collectFrames(stderr, framesDir), audioOk: true };
     } catch (err) {
+      // A cancelled or timed-out decode is not the "no audio stream" case this
+      // fallback exists for — retrying would spend the ffmpeg budget twice and
+      // ignore the cancellation outright.
+      if (isAbortError(err)) throw err;
       this.logger.warn(
         `Combined frame+audio extraction failed for ${videoPath} (likely no audio stream); retrying frames only: ${err}`,
       );
       // Clear any partial frames the failed pass may have written before retry
       await rm(framesDir, { recursive: true, force: true });
-      const frames = await this.runFrameExtraction(videoPath, framesDir, filter);
+      const frames = await this.runFrameExtraction(
+        videoPath,
+        framesDir,
+        filter,
+        signal,
+      );
       return { frames, audioOk: false };
     }
   }
@@ -241,6 +306,7 @@ export class MediaService {
     videoPath: string,
     framesDir: string,
     filter: string,
+    signal?: AbortSignal,
   ): Promise<FrameInfo[]> {
     await execFileAsync('mkdir', ['-p', framesDir]);
     const { stderr } = await execFileAsync(
@@ -257,7 +323,7 @@ export class MediaService {
         '2',
         join(framesDir, 'frame_%05d.jpg'),
       ],
-      { maxBuffer: FFMPEG_MAX_BUFFER },
+      this.childProcessOptions(this.ffmpegTimeoutMs, signal, FFMPEG_MAX_BUFFER),
     );
     return this.collectFrames(stderr, framesDir);
   }
