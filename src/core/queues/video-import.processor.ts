@@ -97,10 +97,8 @@ export class VideoImportProcessor {
         workDir,
         signal,
       );
-      const duration = await this.mediaService.getDurationSeconds(
-        videoPath,
-        signal,
-      );
+      const { durationSeconds: duration, hasAudio } =
+        await this.mediaService.probeVideo(videoPath, signal);
 
       // Single ffmpeg decode pass yields both the captioning frames and the
       // transcription audio (instead of decoding the whole video twice)
@@ -108,6 +106,7 @@ export class VideoImportProcessor {
         await this.mediaService.extractFramesAndAudio(
           videoPath,
           workDir,
+          hasAudio,
           signal,
         );
 

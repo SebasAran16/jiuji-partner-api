@@ -63,7 +63,9 @@ describe('VideoImportProcessor', () => {
             createWorkDir: jest.fn().mockResolvedValue('/tmp/work'),
             cleanupWorkDir: jest.fn(),
             downloadVideo: jest.fn().mockResolvedValue('/tmp/work/source.mp4'),
-            getDurationSeconds: jest.fn().mockResolvedValue(65),
+            probeVideo: jest
+              .fn()
+              .mockResolvedValue({ durationSeconds: 65, hasAudio: true }),
             extractFramesAndAudio: jest
               .fn()
               .mockResolvedValue({ frames: [], audioPath: '/tmp/work/audio.wav' }),
@@ -219,6 +221,10 @@ describe('VideoImportProcessor', () => {
 
   it('skips transcription when the video has no audio stream', async () => {
     videosService.findById.mockResolvedValue(mockVideo());
+    mediaService.probeVideo.mockResolvedValue({
+      durationSeconds: 65,
+      hasAudio: false,
+    });
     mediaService.extractFramesAndAudio.mockResolvedValue({
       frames: [],
       audioPath: null,
@@ -226,6 +232,13 @@ describe('VideoImportProcessor', () => {
 
     await processor.process(mockJob('video-1'));
 
+    // The probe result decides the outputs up front — no audio is requested
+    expect(mediaService.extractFramesAndAudio).toHaveBeenCalledWith(
+      '/tmp/work/source.mp4',
+      '/tmp/work',
+      false,
+      expect.any(AbortSignal),
+    );
     expect(transcriptionService.transcribe).not.toHaveBeenCalled();
     expect(videosService.setProcessingStatus).toHaveBeenNthCalledWith(
       2,

@@ -3,6 +3,12 @@ export interface FrameInfo {
   timestamp: number;
 }
 
+// What one ffprobe call tells the pipeline before decoding starts
+export interface VideoProbe {
+  durationSeconds: number;
+  hasAudio: boolean;
+}
+
 export interface FrameQuality {
   sharpness: number;
   brightness: number;

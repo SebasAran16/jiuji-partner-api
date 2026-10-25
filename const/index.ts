@@ -12,6 +12,7 @@ export type { PaginatedQuery, PaginatedResult } from './pagination';
 export type { DriveFileInfo } from './google-drive.types';
 export type {
   FrameInfo,
+  VideoProbe,
   FrameQuality,
   ScoredFrame,
   FrameCaption,

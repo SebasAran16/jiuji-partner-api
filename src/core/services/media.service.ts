@@ -9,8 +9,13 @@ import { join } from 'path';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import sharp from 'sharp';
-import type { FrameInfo, FrameQuality, ScoredFrame } from '../../../const';
-import { withDeadline, isAbortError } from '../util/deadline';
+import type {
+  FrameInfo,
+  FrameQuality,
+  ScoredFrame,
+  VideoProbe,
+} from '../../../const';
+import { withDeadline } from '../util/deadline';
 
 const execFileAsync = promisify(execFile);
 // showinfo logs one stderr line per frame; default 1MB buffer overflows on long videos
@@ -30,6 +35,18 @@ const SCENE_CHANGE_THRESHOLD = 0.25;
 // Static instructional videos trigger few scene changes; fall back to interval sampling
 const MIN_SCENE_FRAMES = 4;
 const FALLBACK_SAMPLE_INTERVAL_SECONDS = 10;
+
+// Parses `ffprobe -show_entries format=duration:stream=codec_type -of json`.
+export function parseProbeOutput(stdout: string): VideoProbe {
+  const probe = JSON.parse(stdout) as {
+    streams?: { codec_type?: string }[];
+    format?: { duration?: string };
+  };
+  return {
+    durationSeconds: parseFloat(probe.format?.duration ?? '') || 0,
+    hasAudio: (probe.streams ?? []).some((s) => s.codec_type === 'audio'),
+  };
+}
 
 @Injectable()
 export class MediaService {
@@ -148,24 +165,27 @@ export class MediaService {
     };
   }
 
-  async getDurationSeconds(
+  // Duration and audio presence from one ffprobe call. Knowing up front whether
+  // there is an audio stream lets extraction ask ffmpeg for exactly the outputs
+  // that can exist, instead of inferring "no audio" from a failed decode.
+  async probeVideo(
     videoPath: string,
     signal?: AbortSignal,
-  ): Promise<number> {
+  ): Promise<VideoProbe> {
     const { stdout } = await execFileAsync(
       'ffprobe',
       [
         '-v',
         'error',
         '-show_entries',
-        'format=duration',
+        'format=duration:stream=codec_type',
         '-of',
-        'csv=p=0',
+        'json',
         videoPath,
       ],
       this.childProcessOptions(this.ffprobeTimeoutMs, signal),
     );
-    return parseFloat(stdout.trim()) || 0;
+    return parseProbeOutput(stdout);
   }
 
   // `timeout` + `killSignal` are what actually reap the child: an aborted
@@ -187,142 +207,74 @@ export class MediaService {
   // One ffmpeg decode pass that produces BOTH the captioning frames and the
   // Whisper audio, so a video is decoded once regardless of its length (a long
   // instructional used to be decoded twice — once for frames, once for audio).
-  // Frames keep their scene-change→interval fallback; audio degrades to null
-  // independently so a silent video still yields captions.
+  // `hasAudio` comes from probeVideo(): a silent video simply gets no audio
+  // output, and any ffmpeg failure is a real error that propagates.
   async extractFramesAndAudio(
     videoPath: string,
     workDir: string,
+    hasAudio: boolean,
     signal?: AbortSignal,
   ): Promise<{ frames: FrameInfo[]; audioPath: string | null }> {
     const framesDir = join(workDir, 'frames');
-    const audioPath = join(workDir, 'audio.wav');
+    const audioPath = hasAudio ? join(workDir, 'audio.wav') : null;
 
-    // Primary pass: scene-change frames + audio together
-    const scene = await this.runFrameAndAudioExtraction(
+    // Primary pass: scene-change frames (+ audio when there is any)
+    const sceneFrames = await this.runExtraction(
       videoPath,
       framesDir,
       `select='gt(scene,${SCENE_CHANGE_THRESHOLD})',showinfo`,
       audioPath,
       signal,
     );
-    if (scene.frames.length >= MIN_SCENE_FRAMES) {
-      return { frames: scene.frames, audioPath: scene.audioOk ? audioPath : null };
+    if (sceneFrames.length >= MIN_SCENE_FRAMES) {
+      return { frames: sceneFrames, audioPath };
     }
 
     // Too few scene changes (static instructional) → interval sampling. The
-    // audio was already produced above, so re-decode for frames only unless the
-    // primary pass couldn't extract audio (then try once more alongside it).
+    // audio was already produced above, so this decode is frames-only.
     this.logger.log(
-      `Only ${scene.frames.length} scene-change frames in ${videoPath}; falling back to 1 frame / ${FALLBACK_SAMPLE_INTERVAL_SECONDS}s`,
+      `Only ${sceneFrames.length} scene-change frames in ${videoPath}; falling back to 1 frame / ${FALLBACK_SAMPLE_INTERVAL_SECONDS}s`,
     );
-    const fallbackDir = join(workDir, 'frames-fallback');
-    const fallbackFilter = `fps=1/${FALLBACK_SAMPLE_INTERVAL_SECONDS},showinfo`;
-
-    if (scene.audioOk) {
-      const frames = await this.runFrameExtraction(
-        videoPath,
-        fallbackDir,
-        fallbackFilter,
-        signal,
-      );
-      return { frames, audioPath };
-    }
-    const fallback = await this.runFrameAndAudioExtraction(
+    const frames = await this.runExtraction(
       videoPath,
-      fallbackDir,
-      fallbackFilter,
-      audioPath,
+      join(workDir, 'frames-fallback'),
+      `fps=1/${FALLBACK_SAMPLE_INTERVAL_SECONDS},showinfo`,
+      null,
       signal,
     );
-    return {
-      frames: fallback.frames,
-      audioPath: fallback.audioOk ? audioPath : null,
-    };
+    return { frames, audioPath };
   }
 
-  // Single ffmpeg invocation with two outputs (frames + 16kHz mono WAV) driven
-  // by one decode. A video with no audio stream makes the combined mux fail, so
-  // we fall back to a frames-only decode and report audio as unavailable —
-  // frames are never lost to an audio problem.
-  private async runFrameAndAudioExtraction(
+  // One ffmpeg invocation: frames through `filter`, plus a 16kHz mono WAV from
+  // the same decode when `audioPath` is given (null = frames only).
+  private async runExtraction(
     videoPath: string,
     framesDir: string,
     filter: string,
-    audioPath: string,
-    signal?: AbortSignal,
-  ): Promise<{ frames: FrameInfo[]; audioOk: boolean }> {
-    await execFileAsync('mkdir', ['-p', framesDir]);
-    try {
-      const { stderr } = await execFileAsync(
-        'ffmpeg',
-        [
-          '-y',
-          '-i',
-          videoPath,
-          // Frame output
-          '-vf',
-          filter,
-          '-fps_mode',
-          'vfr',
-          '-q:v',
-          '2',
-          join(framesDir, 'frame_%05d.jpg'),
-          // Audio output, same decode: 16kHz mono WAV is what Whisper expects
-          '-vn',
-          '-ac',
-          '1',
-          '-ar',
-          '16000',
-          audioPath,
-        ],
-        this.childProcessOptions(
-          this.ffmpegTimeoutMs,
-          signal,
-          FFMPEG_MAX_BUFFER,
-        ),
-      );
-      return { frames: await this.collectFrames(stderr, framesDir), audioOk: true };
-    } catch (err) {
-      // A cancelled or timed-out decode is not the "no audio stream" case this
-      // fallback exists for — retrying would spend the ffmpeg budget twice and
-      // ignore the cancellation outright.
-      if (isAbortError(err)) throw err;
-      this.logger.warn(
-        `Combined frame+audio extraction failed for ${videoPath} (likely no audio stream); retrying frames only: ${err}`,
-      );
-      // Clear any partial frames the failed pass may have written before retry
-      await rm(framesDir, { recursive: true, force: true });
-      const frames = await this.runFrameExtraction(
-        videoPath,
-        framesDir,
-        filter,
-        signal,
-      );
-      return { frames, audioOk: false };
-    }
-  }
-
-  private async runFrameExtraction(
-    videoPath: string,
-    framesDir: string,
-    filter: string,
+    audioPath: string | null,
     signal?: AbortSignal,
   ): Promise<FrameInfo[]> {
     await execFileAsync('mkdir', ['-p', framesDir]);
+    const args = [
+      '-y',
+      '-i',
+      videoPath,
+      // Frame output
+      '-vf',
+      filter,
+      '-fps_mode',
+      'vfr',
+      '-q:v',
+      '2',
+      join(framesDir, 'frame_%05d.jpg'),
+    ];
+    if (audioPath) {
+      // Audio output, same decode: 16kHz mono WAV is what Whisper expects
+      args.push('-vn', '-ac', '1', '-ar', '16000', audioPath);
+    }
     const { stderr } = await execFileAsync(
       'ffmpeg',
-      [
-        '-y',
-        '-i',
-        videoPath,
-        '-vf',
-        filter,
-        '-fps_mode',
-        'vfr',
-        '-q:v',
-        '2',
-        join(framesDir, 'frame_%05d.jpg'),
-      ],
+      args,
       this.childProcessOptions(this.ffmpegTimeoutMs, signal, FFMPEG_MAX_BUFFER),
     );
     return this.collectFrames(stderr, framesDir);
